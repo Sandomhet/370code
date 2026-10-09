@@ -1,0 +1,10 @@
+2 2 2 3
+0x00810003
+0x00C10002
+0xFFFFFFFF
+0x00000002
+Start T 0
+Val D 1
+0 lw Val
+1 sw loc
+1 .fill loc

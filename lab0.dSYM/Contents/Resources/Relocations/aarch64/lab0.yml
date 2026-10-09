@@ -1,0 +1,5 @@
+---
+triple:          'arm64-apple-darwin'
+binary-path:     '/Users/sandom/Documents/Coding/C++/eecs370/lab0'
+relocations:     []
+...
