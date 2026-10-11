@@ -1,0 +1,1 @@
+Stack	.fill	0

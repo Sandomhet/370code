@@ -19,6 +19,9 @@ typedef struct SymbolTableEntry SymbolTableEntry;
 typedef struct RelocationTableEntry RelocationTableEntry;
 typedef struct CombinedFiles CombinedFiles;
 
+static int lookupGlobal(CombinedFiles *, char *);
+static int isDefinedInFile(FileData *, char *);
+
 struct SymbolTableEntry {
 	char label[7];
 	char location;
@@ -149,15 +152,132 @@ int main(int argc, char *argv[]) {
 		fclose(inFilePtr);
 	} // end reading files
 
-	// *** INSERT YOUR CODE BELOW ***
-	//    Begin the linking process
-	//    Happy coding!!!
+	unsigned int numFiles = argc - 2;
 
-    /* here is an example of using printHexToFile. This will print a
-       machine code word / number in the proper hex format to the output file */
-    printHexToFile(outFilePtr, 123);
+	// lay out the final executable: all text sections, then all data sections, then Stack
+	CombinedFiles combined;
+	combined.textSize = 0;
+	combined.dataSize = 0;
+	for (i = 0; i < numFiles; ++i) {
+		files[i].textStartingLine = combined.textSize;
+		combined.textSize += files[i].textSize;
+	}
+	for (i = 0; i < numFiles; ++i) {
+		files[i].dataStartingLine = combined.textSize + combined.dataSize;
+		combined.dataSize += files[i].dataSize;
+	}
+	unsigned int stackAddress = combined.textSize + combined.dataSize;
 
+	// build the global symbol table from every defined (T/D) global label,
+	// storing each label's final address in its offset field
+	combined.symbolTableSize = 0;
+	for (i = 0; i < numFiles; ++i) {
+		for (j = 0; j < files[i].symbolTableSize; ++j) {
+			SymbolTableEntry *symbol = &files[i].symbolTable[j];
+			if (symbol->location == 'U') {
+				continue;
+			}
+			if (!strcmp(symbol->label, "Stack")) {
+				printf("error: Stack label defined by %s\n", argv[i+1]);
+				exit(1);
+			}
+			if (lookupGlobal(&combined, symbol->label) != -1) {
+				printf("error: duplicate definition of global label %s\n", symbol->label);
+				exit(1);
+			}
+			SymbolTableEntry *global = &combined.symbolTable[combined.symbolTableSize++];
+			strcpy(global->label, symbol->label);
+			global->location = symbol->location;
+			global->offset = (symbol->location == 'T' ? files[i].textStartingLine
+					: files[i].dataStartingLine) + symbol->offset;
+		}
+	}
+
+	// every global used but undefined in its file must be defined somewhere else
+	for (i = 0; i < numFiles; ++i) {
+		for (j = 0; j < files[i].symbolTableSize; ++j) {
+			SymbolTableEntry *symbol = &files[i].symbolTable[j];
+			if (symbol->location == 'U' && strcmp(symbol->label, "Stack")
+					&& lookupGlobal(&combined, symbol->label) == -1) {
+				printf("error: undefined global label %s\n", symbol->label);
+				exit(1);
+			}
+		}
+	}
+
+	// fix every symbolic address listed in the relocation tables
+	for (i = 0; i < numFiles; ++i) {
+		FileData *file = &files[i];
+		for (j = 0; j < file->relocationTableSize; ++j) {
+			RelocationTableEntry *reloc = &file->relocTable[j];
+			int isFill = !strcmp(reloc->inst, ".fill");
+			int *word = isFill ? &file->data[reloc->offset] : &file->text[reloc->offset];
+			// .fill holds the full address; lw/sw hold it in the 16-bit offsetField
+			int oldAddress = isFill ? *word : (*word & 0xFFFF);
+			int newAddress;
+
+			if (isDefinedInFile(file, reloc->label)) {
+				// local label, or a global defined in this same file: the old address
+				// is relative to this file, so shift it by its section's new start
+				if (oldAddress < (int)file->textSize) {
+					newAddress = file->textStartingLine + oldAddress;
+				} else {
+					newAddress = file->dataStartingLine + (oldAddress - file->textSize);
+				}
+			} else if (!strcmp(reloc->label, "Stack")) {
+				newAddress = oldAddress + stackAddress;
+			} else {
+				// undefined in this file, so it was assembled as 0 (plus any constant offset)
+				newAddress = oldAddress + lookupGlobal(&combined, reloc->label);
+			}
+
+			if (isFill) {
+				*word = newAddress;
+			} else {
+				*word = (*word & ~0xFFFF) | (newAddress & 0xFFFF);
+			}
+		}
+	}
+
+	// write the executable
+	for (i = 0; i < numFiles; ++i) {
+		for (j = 0; j < files[i].textSize; ++j) {
+			printHexToFile(outFilePtr, files[i].text[j]);
+		}
+	}
+	for (i = 0; i < numFiles; ++i) {
+		for (j = 0; j < files[i].dataSize; ++j) {
+			printHexToFile(outFilePtr, files[i].data[j]);
+		}
+	}
+	fclose(outFilePtr);
+
+	return 0;
 } // main
+
+// Returns the final address of a defined global label, or -1 if no file defines it.
+static int
+lookupGlobal(CombinedFiles *combined, char *label) {
+	for (unsigned int i = 0; i < combined->symbolTableSize; ++i) {
+		if (!strcmp(combined->symbolTable[i].label, label)) {
+			return combined->symbolTable[i].offset;
+		}
+	}
+	return -1;
+}
+
+// Returns 1 if label is defined inside file, 0 if it is an undefined global.
+// Local labels must always be defined in their own file, so they never appear in the
+// symbol table; only globals listed as 'U' are defined elsewhere.
+static int
+isDefinedInFile(FileData *file, char *label) {
+	for (unsigned int i = 0; i < file->symbolTableSize; ++i) {
+		if (!strcmp(file->symbolTable[i].label, label)) {
+			return file->symbolTable[i].location != 'U';
+		}
+	}
+	return 1;
+}
 
 // Prints a machine code word in the proper hex format to the file
 static inline void 
