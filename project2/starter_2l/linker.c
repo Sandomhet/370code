@@ -21,6 +21,7 @@ typedef struct CombinedFiles CombinedFiles;
 
 static int lookupGlobal(CombinedFiles *, char *);
 static int isDefinedInFile(FileData *, char *);
+static int relocateAddress(FileData *, char *, int, CombinedFiles *, unsigned int);
 
 struct SymbolTableEntry {
 	char label[7];
@@ -210,31 +211,18 @@ int main(int argc, char *argv[]) {
 		FileData *file = &files[i];
 		for (j = 0; j < file->relocationTableSize; ++j) {
 			RelocationTableEntry *reloc = &file->relocTable[j];
-			int isFill = !strcmp(reloc->inst, ".fill");
-			int *word = isFill ? &file->data[reloc->offset] : &file->text[reloc->offset];
-			// .fill holds the full address; lw/sw hold it in the 16-bit offsetField
-			int oldAddress = isFill ? *word : (*word & 0xFFFF);
-			int newAddress;
 
-			if (isDefinedInFile(file, reloc->label)) {
-				// local label, or a global defined in this same file: the old address
-				// is relative to this file, so shift it by its section's new start
-				if (oldAddress < (int)file->textSize) {
-					newAddress = file->textStartingLine + oldAddress;
-				} else {
-					newAddress = file->dataStartingLine + (oldAddress - file->textSize);
-				}
-			} else if (!strcmp(reloc->label, "Stack")) {
-				newAddress = oldAddress + stackAddress;
+			if (!strcmp(reloc->inst, ".fill")) {
+				// .fill: the whole data word is the address
+				int *dataWord = &file->data[reloc->offset];
+				*dataWord = relocateAddress(file, reloc->label, *dataWord,
+						&combined, stackAddress);
 			} else {
-				// undefined in this file, so it was assembled as 0 (plus any constant offset)
-				newAddress = oldAddress + lookupGlobal(&combined, reloc->label);
-			}
-
-			if (isFill) {
-				*word = newAddress;
-			} else {
-				*word = (*word & ~0xFFFF) | (newAddress & 0xFFFF);
+				// lw/sw: the address is the 16-bit offsetField; keep opcode, regA, regB
+				int *instr = &file->text[reloc->offset];
+				int newAddress = relocateAddress(file, reloc->label, *instr & 0xFFFF,
+						&combined, stackAddress);
+				*instr = (*instr & ~0xFFFF) | (newAddress & 0xFFFF);
 			}
 		}
 	}
@@ -264,6 +252,26 @@ lookupGlobal(CombinedFiles *combined, char *label) {
 		}
 	}
 	return -1;
+}
+
+// Returns the final address of label as used in file, given the address the
+// assembler stored for it (oldAddress).
+static int
+relocateAddress(FileData *file, char *label, int oldAddress,
+		CombinedFiles *combined, unsigned int stackAddress) {
+	if (isDefinedInFile(file, label)) {
+		// local label, or a global defined in this same file: the old address is a
+		// line in this file, so shift it by the new start of the section it was in
+		if (oldAddress < (int)file->textSize) {
+			return file->textStartingLine + oldAddress;
+		}
+		return file->dataStartingLine + (oldAddress - file->textSize);
+	}
+	// undefined in this file: the assembler stored 0, so use the final address directly
+	if (!strcmp(label, "Stack")) {
+		return stackAddress;
+	}
+	return lookupGlobal(combined, label);
 }
 
 // Returns 1 if label is defined inside file, 0 if it is an undefined global.
