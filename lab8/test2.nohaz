@@ -1,0 +1,12 @@
+    add     1       2       3
+    noop
+    noop
+    noop
+    nor     3       4       5
+    add     6       3       7
+    lw      3       6       10
+    noop
+    noop
+    noop
+    sw      6       2       12
+    halt
