@@ -122,7 +122,16 @@ int main(int argc, char *argv[]) {
     readMachineCode(&state, argv[1]);
 
     /* ------------ Initialize State ------------ */
-
+    state.cycles = 0;
+    state.pc = 0;
+    for (int i = 0; i < NUMREGS; ++i) {
+        state.reg[i] = 0;
+    }
+    state.IFID.instr = NOOPINSTR;
+    state.IDEX.instr = NOOPINSTR;
+    state.EXMEM.instr = NOOPINSTR;
+    state.MEMWB.instr = NOOPINSTR;
+    state.WBEND.instr = NOOPINSTR;
     /* ------------------- END ------------------ */
 
     newState = state;
@@ -133,19 +142,114 @@ int main(int argc, char *argv[]) {
         newState.cycles += 1;
 
         /* ---------------------- IF stage --------------------- */
-
+        newState.IFID.instr = state.instrMem[state.pc];
+        newState.IFID.pcPlus1 = state.pc + 1;
+        newState.pc = state.pc + 1;
 
         /* ---------------------- ID stage --------------------- */
+        int idInstr = state.IFID.instr;
+        newState.IDEX.instr = idInstr;
+        newState.IDEX.pcPlus1 = state.IFID.pcPlus1;
+        newState.IDEX.valA = state.reg[field0(idInstr)];
+        newState.IDEX.valB = state.reg[field1(idInstr)];
+        newState.IDEX.offset = convertNum(field2(idInstr));
 
+        // load-use hazard: lw in EX, dependent instruction in ID -> stall one cycle
+        if (opcode(state.IDEX.instr) == LW) {
+            int lwDest = field1(state.IDEX.instr);
+            int idOp = opcode(idInstr);
+            int readsA = idOp == ADD || idOp == NOR || idOp == LW || idOp == SW || idOp == BEQ;
+            int readsB = idOp == ADD || idOp == NOR || idOp == SW || idOp == BEQ;
+            if (lwDest != 0 && ((readsA && field0(idInstr) == lwDest) ||
+                                (readsB && field1(idInstr) == lwDest))) {
+                newState.IDEX.instr = NOOPINSTR;  // bubble into EX
+                newState.IFID = state.IFID;       // hold instruction in ID
+                newState.pc = state.pc;           // hold fetch
+            }
+        }
 
         /* ---------------------- EX stage --------------------- */
+        int exInstr = state.IDEX.instr;
+        int exA = state.IDEX.valA;
+        int exB = state.IDEX.valB;
+        int exRegA = field0(exInstr);
+        int exRegB = field1(exInstr);
 
+        // forwarding: check oldest (WBEND) first so newer stages overwrite it
+        int fwdInstr[3] = {state.WBEND.instr, state.MEMWB.instr, state.EXMEM.instr};
+        int fwdData[3] = {state.WBEND.writeData, state.MEMWB.writeData, state.EXMEM.aluResult};
+        for (int i = 0; i < 3; ++i) {
+            int op = opcode(fwdInstr[i]);
+            int dest;
+            if (op == ADD || op == NOR) {
+                dest = field2(fwdInstr[i]) & 0x7;
+            } else if (op == LW && i != 2) { // lw in EXMEM has no data yet (stall prevents this case)
+                dest = field1(fwdInstr[i]);
+            } else {
+                continue;
+            }
+            if (dest == 0) {
+                continue; // reg 0 is always 0
+            }
+            if (dest == exRegA) {
+                exA = fwdData[i];
+            }
+            if (dest == exRegB) {
+                exB = fwdData[i];
+            }
+        }
+
+        newState.EXMEM.instr = exInstr;
+        newState.EXMEM.branchTarget = state.IDEX.pcPlus1 + state.IDEX.offset;
+        newState.EXMEM.eq = (exA == exB);
+        newState.EXMEM.valB = exB;
+        switch (opcode(exInstr)) {
+            case ADD:
+                newState.EXMEM.aluResult = exA + exB;
+                break;
+            case NOR:
+                newState.EXMEM.aluResult = ~(exA | exB);
+                break;
+            case LW:
+            case SW:
+                newState.EXMEM.aluResult = exA + state.IDEX.offset;
+                break;
+            default:
+                newState.EXMEM.aluResult = 0;
+                break;
+        }
 
         /* --------------------- MEM stage --------------------- */
-
+        int memInstr = state.EXMEM.instr;
+        newState.MEMWB.instr = memInstr;
+        newState.MEMWB.writeData = state.EXMEM.aluResult;
+        if (opcode(memInstr) == LW) {
+            newState.MEMWB.writeData = state.dataMem[state.EXMEM.aluResult];
+        } else if (opcode(memInstr) == SW) {
+            newState.dataMem[state.EXMEM.aluResult] = state.EXMEM.valB;
+        } else if (opcode(memInstr) == BEQ && state.EXMEM.eq) {
+            // predicted not-taken was wrong: squash IF, ID, EX and redirect
+            newState.pc = state.EXMEM.branchTarget;
+            newState.IFID.instr = NOOPINSTR;
+            newState.IDEX.instr = NOOPINSTR;
+            newState.EXMEM.instr = NOOPINSTR;
+        }
 
         /* ---------------------- WB stage --------------------- */
-
+        int wbInstr = state.MEMWB.instr;
+        newState.WBEND.instr = wbInstr;
+        newState.WBEND.writeData = state.MEMWB.writeData;
+        if (opcode(wbInstr) == ADD || opcode(wbInstr) == NOR) {
+            int dest = field2(wbInstr) & 0x7;
+            if (dest != 0) {
+                newState.reg[dest] = state.MEMWB.writeData;
+            }
+        } else if (opcode(wbInstr) == LW) {
+            int dest = field1(wbInstr);
+            if (dest != 0) {
+                newState.reg[dest] = state.MEMWB.writeData;
+            }
+        }
 
         /* ------------------------ END ------------------------ */
         state = newState; /* this is the last statement before end of the loop. It marks the end
